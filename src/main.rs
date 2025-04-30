@@ -2,6 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base32;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
+use keyring::{Entry, Result};
+
 
 type HmacSha1 = Hmac<Sha1>;
 
@@ -37,7 +39,7 @@ fn htop(key:&str, counter:u64, digits:usize) -> String {
     println!("mac : {}", hex);
 
     let offset = (mac[mac.len() - 1] & 0x0f) as usize;
-    let slice = &mac[offset..offset + 4]; // mac is a &[u8]
+    let slice = &mac[offset..offset + 4]; // mac is a Vec<u8>
     let binary = (u32::from_be_bytes(slice.try_into().unwrap()) & 0x7fffffff).to_string();
 
 
@@ -59,8 +61,29 @@ fn totp(key:&str, time_step:u64, digits:usize) -> String {
     return htop(key, time / time_step, digits);
 }
 
+
+fn get_entries(service:&str, user:&str) -> Result<()> {
+    let entry = Entry::new(service, user)?;
+    entry.set_password("topS3cr3tP4$$w0rd")?;
+
+    let password = entry.get_password()?;
+    println!("My password is '{}'", password);
+    entry.delete_credential()?;
+
+    Ok(())
+}
+
+fn create_entry(service:&str, user:&str) -> Result<()> {
+
+    let entry = Entry::new(service, user)?;
+    entry.set_password("topS3cr3tP4$$w0rd")?;
+
+    Ok(())
+}
+
+
 fn main() {
-    
+    let secret: &str = "us8fhdi7sd6udsdgjkdsf6sdgudgg34f";
     println!("{:?}", totp(secret, 30, 6))
 
     //println!("{}{:=<length$}","dgsdg", length = ((8 as i32 - "2".chars().count() as i32) % 8) as usize )

@@ -1,0 +1,1 @@
+A terminal application to manage and view TOTP entries. This is a small project I decided to work on because I am lazy and I don't want to keep checking my phone for MFA.

@@ -6,4 +6,7 @@ edition = "2024"
 [dependencies]
 base32 = "0.5.1"
 base64 = "0.22.1"
+digest = "0.10.7"
 hmac = "0.12.1"
+sha = "1.0.3"
+sha1 = "0.10.6"

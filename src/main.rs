@@ -1,90 +1,410 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-use base32;
-use hmac::{Hmac, Mac};
-use sha1::Sha1;
-use keyring::{Entry, Result};
+mod totp;
 
-
-type HmacSha1 = Hmac<Sha1>;
-
-
-fn compute_hmac(key: &[u8],counter: u64 ) -> Vec<u8> {
-    let counter_bytes = counter.to_be_bytes();
-
-    let mut mac = HmacSha1::new_from_slice(key).expect("HMAC can take any key size");
-    mac.update(&counter_bytes);
-    mac.finalize().into_bytes().to_vec()
-}
-fn htop(key:&str, counter:u64, digits:usize) -> String {
-
-    let key = format!("{k:=<length$}", k=key.to_uppercase(), length = ((8 as i32 - "2".chars().count() as i32) % 8) as usize);
-
-    println!("key : {}",key);
-
-    let decoded_key = base32::decode(base32::Alphabet::Rfc4648 { padding: true }, &key).unwrap();
-
-    let hex: String = decoded_key.iter().map(|b| format!("{:02x}", b)).collect();
-    println!("dec : {}", hex);
-
-    let counter_bytes = counter.to_be_bytes();
-
-    let hex: String = counter_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    let padded = format!("{:0>16}", hex);
-    println!("cou : {}",padded);
-
-
-    let mac = compute_hmac(&decoded_key, counter);
-
-    let hex: String = mac.iter().map(|b| format!("{:02x}", b)).collect();
-    println!("mac : {}", hex);
-
-    let offset = (mac[mac.len() - 1] & 0x0f) as usize;
-    let slice = &mac[offset..offset + 4]; // mac is a Vec<u8>
-    let binary = (u32::from_be_bytes(slice.try_into().unwrap()) & 0x7fffffff).to_string();
+use chrono::prelude::*;
+use crossterm::{
+    event::{self, Event as CEvent, KeyCode},
+    terminal::{disable_raw_mode, enable_raw_mode},
+};
+use rand::{distr::Alphanumeric, Rng};
+//use rand::{distributions::Alphanumeric, prelude::*};
+use serde::{Deserialize, Serialize};
+//use thiserror::Error;
+use std::fs;
+use std::io;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+//use thiserror::Error;
+use tui::{
+    backend::CrosstermBackend,
+    layout::{Alignment, Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Span, Spans},
+    widgets::{
+        Block, BorderType, Borders, Cell, List, ListItem, ListState, Paragraph, Row, Table, Tabs,
+    },
+    Terminal,
+};
 
 
 
-    let result = binary[binary.chars().count() - digits..].to_string();
+const DB_PATH: &str = "./data/db.json";
 
-    return format!("{r:0<d$}", r=result, d=digits);
-
-
-
-}
-
-fn totp(key:&str, time_step:u64, digits:usize) -> String {
-
-    let time = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .expect("Time went backwards").as_secs() as u64;
-
-    return htop(key, time / time_step, digits);
+enum Event<I> {
+    Input(I),
+    Tick,
 }
 
 
-fn get_entries(service:&str, user:&str) -> Result<()> {
-    let entry = Entry::new(service, user)?;
-    entry.set_password("topS3cr3tP4$$w0rd")?;
 
-    let password = entry.get_password()?;
-    println!("My password is '{}'", password);
-    entry.delete_credential()?;
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Entry {
+    id: usize,
+    name: String,
+    secret: String,
+    created_at: String,
+}
+
+#[derive(Copy, Clone, Debug)]
+enum MenuItem {
+    Home,
+    Entries,
+    Add,
+    Settings,
+}
+
+impl From<MenuItem> for usize {
+    fn from(input: MenuItem) -> usize {
+        match input {
+            MenuItem::Home => 0,
+            MenuItem::Entries => 1,
+            MenuItem::Add => 2,
+            MenuItem::Settings => 3,
+        }
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+
+    let secrets = ["ZZB53LB7PKWWT2M7LHGA2GEAIQAK26GS", "ZZB57MFSPKWWT2M7TKKA2GEAIQAK26GS"];
+    for secret in secrets {
+        println!("{:?}", totp::totp(secret, 30, 6))
+    }
+
+
+    enable_raw_mode().expect("can run in raw mode");
+
+    let (tx, rx) = mpsc::channel();
+    let tick_rate = Duration::from_millis(200);
+    thread::spawn(move || {
+        let mut last_tick = Instant::now();
+        loop {
+            let timeout = tick_rate
+                .checked_sub(last_tick.elapsed())
+                .unwrap_or_else(|| Duration::from_secs(0));
+
+            if event::poll(timeout).expect("poll works") {
+                if let CEvent::Key(key) = event::read().expect("can read events") {
+                    tx.send(Event::Input(key)).expect("can send events");
+                }
+            }
+
+            if last_tick.elapsed() >= tick_rate {
+                if let Ok(_) = tx.send(Event::Tick) {
+                    last_tick = Instant::now();
+                }
+            }
+        }
+    });
+
+    let stdout = io::stdout();
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
+
+    let menu_titles = vec!["Home","Entries","Add", "Settings", "Quit"];
+    let mut active_menu_item = MenuItem::Home;
+    let mut entry_list_state = ListState::default();
+    entry_list_state.select(Some(0));
+
+    loop {
+        terminal.draw(|rect| {
+            let size = rect.size();
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(2)
+                .constraints(
+                    [
+                        Constraint::Length(3),
+                        Constraint::Min(2),
+                        Constraint::Length(3),
+                    ]
+                    .as_ref(),
+                )
+                .split(size);
+
+            let copyright = Paragraph::new("totp-CLI by aviag3n/Altharion")
+                .style(Style::default().fg(Color::LightCyan))
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .style(Style::default().fg(Color::White))
+                        .title("Copyright")
+                        .border_type(BorderType::Plain),
+                );
+
+            let menu = menu_titles
+                .iter()
+                .map(|t| {
+                    let (first, rest) = t.split_at(1);
+                    Spans::from(vec![
+                        Span::styled(
+                            first,
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::UNDERLINED),
+                        ),
+                        Span::styled(rest, Style::default().fg(Color::White)),
+                    ])
+                })
+                .collect();
+
+            let tabs = Tabs::new(menu)
+                .select(active_menu_item.into())
+                .block(Block::default().title("Menu").borders(Borders::ALL))
+                .style(Style::default().fg(Color::White))
+                .highlight_style(Style::default().fg(Color::Yellow))
+                .divider(Span::raw("|"));
+
+            rect.render_widget(tabs, chunks[0]);
+            match active_menu_item {
+                MenuItem::Home => rect.render_widget(render_home(), chunks[1]),
+                MenuItem::Entries => {
+                    let entry_chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints(
+                            [Constraint::Percentage(20), Constraint::Percentage(80)].as_ref(),
+                        )
+                        .split(chunks[1]);
+                    let (left, right) = render_entries(&entry_list_state);
+                    rect.render_stateful_widget(left, entry_chunks[0], &mut entry_list_state);
+                    rect.render_widget(right, entry_chunks[1]);
+                    
+                },
+                MenuItem::Add => {
+                    
+                },
+                MenuItem::Settings => {
+                    
+
+                }
+            }
+            rect.render_widget(copyright, chunks[2]);
+        })?;
+
+        match rx.recv()? {
+            Event::Input(event) => match event.code {
+                KeyCode::Char('q') => {
+                    terminal.clear()?;
+                    disable_raw_mode()?;
+                    terminal.show_cursor()?;
+                    break;
+                }
+                KeyCode::Char('h') => active_menu_item = MenuItem::Home,
+                KeyCode::Char('e') => active_menu_item = MenuItem::Entries,
+                KeyCode::Char('a') => active_menu_item = MenuItem::Add,
+                KeyCode::Char('s') => active_menu_item = MenuItem::Settings,
+                
+                
+                KeyCode::Char('r') => {
+                    add_random_entry_to_db().expect("can add new random entry");
+                },
+
+                /*
+                KeyCode::Char('d') => {
+                    remove_entry_at_index(&mut entry_list_state).expect("can remove entry");
+                }
+                */
+                KeyCode::Down => {
+                    if let Some(selected) = entry_list_state.selected() {
+                        let amount_entries = read_db().expect("can fetch entry list").len();
+                        if selected >= amount_entries - 1 {
+                            entry_list_state.select(Some(0));
+                        } else {
+                            entry_list_state.select(Some(selected + 1));
+                        }
+                    }
+                }
+                KeyCode::Up => {
+                    if let Some(selected) = entry_list_state.selected() {
+                        let amount_entries = read_db().expect("can fetch entry list").len();
+                        if selected > 0 {
+                            entry_list_state.select(Some(selected - 1));
+                        } else {
+                            entry_list_state.select(Some(amount_entries - 1));
+                        }
+                    }
+                }
+                
+                _ => {}
+            },
+            Event::Tick => {}
+        }
+    }
 
     Ok(())
 }
 
-fn create_entry(service:&str, user:&str) -> Result<()> {
+fn render_home<'a>() -> Paragraph<'a> {
+    let home = Paragraph::new(vec![
+        Spans::from(vec![Span::raw("")]),
+        Spans::from(vec![Span::raw("Welcome to")]),
+        Spans::from(vec![Span::raw("")]),
+        Spans::from(vec![Span::styled(
+            r"_        _                _____ _      _____ ",
+            Style::default().fg(Color::Magenta), //Red
+        )]),
+        Spans::from(vec![Span::styled(
+            r"| |      | |              / ____| |    |_   _|",
+            Style::default().fg(Color::Magenta), //red
+        )]),
+        Spans::from(vec![Span::styled(
+            r"| |_ ___ | |_ _ __ ______| |    | |      | |  ",
+            Style::default().fg(Color::Magenta), //yellow
+        )]),
+        Spans::from(vec![Span::styled(
+            r"| __/ _ \| __| '_ \______| |    | |      | |  ",
+            Style::default().fg(Color::Magenta), //green
+        )]),
+        Spans::from(vec![Span::styled(
+            r"| || (_) | |_| |_) |     | |____| |____ _| |_ ",
+            Style::default().fg(Color::Magenta),//blue
+        )]),
+        Spans::from(vec![Span::styled(
+            r" \__\___/ \__| .__/       \_____|______|_____|",
+            Style::default().fg(Color::Magenta),//magenta
+        )]),
+        Spans::from(vec![Span::styled(
+            r"             | |                              ",
+            Style::default().fg(Color::Magenta),//lightmagenta
+        )]),
+        Spans::from(vec![Span::styled(
+            r"             |_|                              ",
+            Style::default().fg(Color::Magenta),//white
+        )]),
+        Spans::from(vec![Span::raw("")]),
+        Spans::from(vec![Span::raw("Press 'e' to view entries, 'a' to add a new entry, 'r' to add a random entry and 's' access settings")]),
+    ])
+    .alignment(Alignment::Center)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::White))
+            .title("Home")
+            .border_type(BorderType::Plain),
+    );
+    home
+}
 
-    let entry = Entry::new(service, user)?;
-    entry.set_password("topS3cr3tP4$$w0rd")?;
+fn render_entries<'a>(entry_list_state: &ListState) -> (List<'a>, Table<'a>) {
+    let entries = Block::default()
+        .borders(Borders::ALL)
+        .style(Style::default().fg(Color::White))
+        .title("entries")
+        .border_type(BorderType::Plain);
 
+    let entry_list = read_db().expect("can fetch entry list");
+    let items: Vec<_> = entry_list
+        .iter()
+        .map(|entry| {
+            ListItem::new(Spans::from(vec![Span::styled(
+                entry.name.clone(),
+                Style::default(),
+            )]))
+        })
+        .collect();
+
+    let selected_entry = entry_list
+        .get(
+            entry_list_state
+                .selected()
+                .expect("there is always a selected entry"),
+        )
+        .expect("exists")
+        .clone();
+
+    let list = List::new(items).block(entries).highlight_style(
+        Style::default()
+            .bg(Color::Yellow)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let entry_detail = Table::new(vec![Row::new(vec![
+        Cell::from(Span::raw(selected_entry.id.to_string())),
+        Cell::from(Span::raw(selected_entry.name)),
+        Cell::from(Span::raw(totp::totp(&selected_entry.secret, 30, 6))),
+        Cell::from(Span::raw(selected_entry.created_at.to_string())),
+    ])])
+    .header(Row::new(vec![
+        Cell::from(Span::styled(
+            "ID",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Cell::from(Span::styled(
+            "Name",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Cell::from(Span::styled(
+            "Code",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Cell::from(Span::styled(
+            "Created At",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::White))
+            .title("Detail")
+            .border_type(BorderType::Plain),
+    )
+    .widths(&[
+        Constraint::Percentage(5),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+        Constraint::Percentage(20),
+    ]);
+
+    (list, entry_detail)
+}
+
+fn read_db() -> Result<Vec<Entry>, std::io::Error> {
+    let db_content = fs::read_to_string(DB_PATH)?;
+    let parsed: Vec<Entry> = serde_json::from_str(&db_content)?;
+    Ok(parsed)
+}
+
+
+
+fn add_random_entry_to_db() -> Result<Vec<Entry>, std::io::Error> {
+    let mut rng = rand::rng();
+    let db_content = fs::read_to_string(DB_PATH)?;
+    let mut parsed: Vec<Entry> = serde_json::from_str(&db_content)?;
+
+    let random_entry =Entry {
+        id: rng.random_range(0..9999999),
+        name: rng.clone().sample_iter(Alphanumeric).take(10).map(char::from).collect(),
+        secret: rng.sample_iter(Alphanumeric).take(32).map(char::from).collect(),
+        created_at: Utc::now().format("%d/%m/%Y").to_string(),
+    };
+
+    //println!("Generated random entry: {:?}", random_entry);
+
+    // Add the random entry to the list and write it back to the file
+    parsed.push(random_entry);
+    fs::write(DB_PATH, &serde_json::to_vec(&parsed)?)?;
+    Ok(parsed)
+}
+
+
+/*
+fn remove_entry_at_index(entry_list_state: &mut ListState) -> Result<(), std::io::Error> {
+    if let Some(selected) = entry_list_state.selected() {
+        let db_content = fs::read_to_string(DB_PATH)?;
+        let mut parsed: Vec<Entry> = serde_json::from_str(&db_content)?;
+        parsed.remove(selected);
+        fs::write(DB_PATH, &serde_json::to_vec(&parsed)?)?;
+        let amount_entries = read_db().expect("can fetch entry list").len();
+        if selected > 0 {
+            entry_list_state.select(Some(selected - 1));
+        } else {
+            entry_list_state.select(Some(0));
+        }
+    }
     Ok(())
 }
-
-
-fn main() {
-    let secret: &str = "us8fhdi7sd6udsdgjkdsf6sdgudgg34f";
-    println!("{:?}", totp(secret, 30, 6))
-
-    //println!("{}{:=<length$}","dgsdg", length = ((8 as i32 - "2".chars().count() as i32) % 8) as usize )
-}
+    */

@@ -198,7 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 
                 
                 KeyCode::Char('r') => {
-                    add_random_entry_to_db().expect("can add new random entry");
+                    add_random_entry_to_db().expect("shoulde be able to add new random entry");
                 },
 
                 /*
@@ -294,8 +294,8 @@ fn render_entries<'a>(entry_list_state: &ListState) -> (List<'a>, Table<'a>) {
         .title("entries")
         .border_type(BorderType::Plain);
 
-    let entry_list = read_db().expect("can fetch entry list");
-    let items: Vec<_> = entry_list
+    let mut entry_list = read_db().expect("can fetch entry list");
+    let mut items: Vec<_> = entry_list
         .iter()
         .map(|entry| {
             ListItem::new(Spans::from(vec![Span::styled(
@@ -304,6 +304,25 @@ fn render_entries<'a>(entry_list_state: &ListState) -> (List<'a>, Table<'a>) {
             )]))
         })
         .collect();
+
+
+    if items.len() == 0 {
+
+        add_new_entry_to_db("Placeholder", "ZZB53LB7PKWWT2M7LHGA2GEAIQAK26GS").expect("Should be able to add Placheolder Entry");
+
+        entry_list = read_db().expect("can fetch entry list");
+        items  = entry_list
+        .iter()
+        .map(|entry| {
+            ListItem::new(Spans::from(vec![Span::styled(
+                entry.name.clone(),
+                Style::default(),
+            )]))
+        })
+        .collect();
+
+    }
+
 
     let selected_entry = entry_list
         .get(
@@ -365,6 +384,28 @@ fn render_entries<'a>(entry_list_state: &ListState) -> (List<'a>, Table<'a>) {
 fn read_db() -> Result<Vec<Entry>, std::io::Error> {
     let db_content = fs::read_to_string(DB_PATH)?;
     let parsed: Vec<Entry> = serde_json::from_str(&db_content)?;
+    Ok(parsed)
+}
+
+
+
+fn add_new_entry_to_db(name:&str, secret:&str) -> Result<Vec<Entry>, std::io::Error> {
+    let mut rng = rand::rng();
+    let db_content = fs::read_to_string(DB_PATH)?;
+    let mut parsed: Vec<Entry> = serde_json::from_str(&db_content)?;
+
+    let entry =Entry {
+        id: rng.random_range(0..9999999),
+        name: name.to_string(),
+        secret: secret.to_string(),
+        created_at: Utc::now().format("%d/%m/%Y").to_string(),
+    };
+
+    //println!("Generated random entry: {:?}", random_entry);
+
+    // Add the random entry to the list and write it back to the file
+    parsed.push(entry);
+    fs::write(DB_PATH, &serde_json::to_vec(&parsed)?)?;
     Ok(parsed)
 }
 

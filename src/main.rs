@@ -53,6 +53,11 @@ enum MenuItem {
     Settings,
 }
 
+enum InputMode {
+    Normal,
+    Editing,
+}
+
 impl From<MenuItem> for usize {
     fn from(input: MenuItem) -> usize {
         match input {
@@ -64,7 +69,33 @@ impl From<MenuItem> for usize {
     }
 }
 
+
+
+
+struct App {
+    /// Current value of the input box
+    input: String,
+    /// Current input mode
+    input_mode: InputMode,
+    /// History of recorded messages
+    messages: Vec<String>,
+}
+
+impl Default for App {
+    fn default() -> App {
+        App {
+            input: String::new(),
+            input_mode: InputMode::Normal,
+            messages: Vec::new(),
+        }
+    }
+}
+
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+
+    let mut app = App::default();
+
 
     let secrets = ["ZZB53LB7PKWWT2M7LHGA2GEAIQAK26GS", "ZZB57MFSPKWWT2M7TKKA2GEAIQAK26GS"];
     for secret in secrets {
@@ -75,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode().expect("can run in raw mode");
 
     let (tx, rx) = mpsc::channel();
-    let tick_rate = Duration::from_millis(200);
+    let tick_rate = Duration::from_millis(500);
     thread::spawn(move || {
         let mut last_tick = Instant::now();
         loop {
@@ -159,8 +190,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             rect.render_widget(tabs, chunks[0]);
             match active_menu_item {
-                MenuItem::Home => rect.render_widget(render_home(), chunks[1]),
+                MenuItem::Home => {
+                    rect.render_widget(render_home(), chunks[1]);
+                    app.input_mode = InputMode::Normal;
+                
+                },
                 MenuItem::Entries => {
+                    app.input_mode = InputMode::Normal;
+
                     let entry_chunks = Layout::default()
                         .direction(Direction::Horizontal)
                         .constraints(
@@ -173,65 +210,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     
                 },
                 MenuItem::Add => {
+                    app.input_mode = InputMode::Editing;
+                    rect.render_widget(render_add_entry(&app), chunks[1]);
+
                     
                 },
                 MenuItem::Settings => {
                     
+                    app.input_mode = InputMode::Normal;
 
                 }
             }
             rect.render_widget(copyright, chunks[2]);
+
+
+
+
+
         })?;
 
         match rx.recv()? {
-            Event::Input(event) => match event.code {
-                KeyCode::Char('q') => {
-                    terminal.clear()?;
-                    disable_raw_mode()?;
-                    terminal.show_cursor()?;
-                    break;
-                }
-                KeyCode::Char('h') => active_menu_item = MenuItem::Home,
-                KeyCode::Char('e') => active_menu_item = MenuItem::Entries,
-                KeyCode::Char('a') => active_menu_item = MenuItem::Add,
-                KeyCode::Char('s') => active_menu_item = MenuItem::Settings,
+            Event::Input(event) => match app.input_mode {
                 
-                
-                KeyCode::Char('r') => {
-                    add_random_entry_to_db().expect("shoulde be able to add new random entry");
-                },
+                    InputMode::Normal => match event.code {
+                        KeyCode::Char('q') => {
+                            break;
+                        }
+                        KeyCode::Char('h') => active_menu_item = MenuItem::Home,
+                        KeyCode::Char('e') => active_menu_item = MenuItem::Entries,
+                        KeyCode::Char('a') => active_menu_item = MenuItem::Add,
+                        KeyCode::Char('s') => active_menu_item = MenuItem::Settings,
+                        
+                        
+                        KeyCode::Char('r') => {
+                            add_random_entry_to_db().expect("shoulde be able to add new random entry");
+                        },
 
-                /*
-                KeyCode::Char('d') => {
-                    remove_entry_at_index(&mut entry_list_state).expect("can remove entry");
-                }
-                */
-                KeyCode::Down => {
-                    if let Some(selected) = entry_list_state.selected() {
-                        let amount_entries = read_db().expect("can fetch entry list").len();
-                        if selected >= amount_entries - 1 {
-                            entry_list_state.select(Some(0));
-                        } else {
-                            entry_list_state.select(Some(selected + 1));
+                        KeyCode::Down => {
+                            if let Some(selected) = entry_list_state.selected() {
+                                let amount_entries = read_db().expect("can fetch entry list").len();
+                                if selected >= amount_entries - 1 {
+                                    entry_list_state.select(Some(0));
+                                } else {
+                                    entry_list_state.select(Some(selected + 1));
+                                }
+                            }
                         }
-                    }
-                }
-                KeyCode::Up => {
-                    if let Some(selected) = entry_list_state.selected() {
-                        let amount_entries = read_db().expect("can fetch entry list").len();
-                        if selected > 0 {
-                            entry_list_state.select(Some(selected - 1));
-                        } else {
-                            entry_list_state.select(Some(amount_entries - 1));
+                        KeyCode::Up => {
+                            if let Some(selected) = entry_list_state.selected() {
+                                let amount_entries = read_db().expect("can fetch entry list").len();
+                                if selected > 0 {
+                                    entry_list_state.select(Some(selected - 1));
+                                } else {
+                                    entry_list_state.select(Some(amount_entries - 1));
+                                }
+                            }
                         }
+                        
+                        _ => {}
+                    },
+                    
+                    InputMode::Editing => match event.code {
+                        KeyCode::Enter => {
+                            app.messages.push(app.input.drain(..).collect());
+                        }
+                        KeyCode::Char(c) => {
+                            app.input.push(c);
+                        }
+                        KeyCode::Backspace => {
+                            app.input.pop();
+                        }
+                        KeyCode::Esc => {
+                            app.input_mode = InputMode::Normal;
+                        }
+                        _ => {}
                     }
-                }
                 
-                _ => {}
             },
             Event::Tick => {}
         }
     }
+
+
+
+
+
+
+
+    terminal.clear()?;
+    disable_raw_mode()?;
+    terminal.show_cursor()?;
+
 
     Ok(())
 }
@@ -387,6 +456,25 @@ fn read_db() -> Result<Vec<Entry>, std::io::Error> {
     Ok(parsed)
 }
 
+
+
+fn render_add_entry<'a>(app:&'a App) -> Paragraph<'a>{
+    let input = Paragraph::new(app.input.as_ref())
+    .style(match app.input_mode {
+        InputMode::Normal => Style::default(),
+        InputMode::Editing => Style::default().fg(Color::Yellow),
+    })
+    .alignment(Alignment::Center)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::White))
+            .title("Add Entry")
+            .border_type(BorderType::Plain),
+    );
+
+    input
+}
 
 
 fn add_new_entry_to_db(name:&str, secret:&str) -> Result<Vec<Entry>, std::io::Error> {
